@@ -343,11 +343,13 @@ function ChatServer.Start()
 			return
 		end
 
-		-- Admin commands already pass through hidden normal chat on the client.
-		-- Do not call an Adonis or BindableEvent API from IGCS.
+		-- Admin commands still hit hidden normal chat on the client (transport
+		-- for admin tools). Do not call an Adonis or BindableEvent API from IGCS.
+		-- Bubbles use the same IGCS Chat:Chat path as global chat for consistency.
 		if parsed.kind == "admin" then
 			local filtered = filterForBroadcast(player, parsed.message)
 			if filtered then
+				bubbleChatForPlayer(player, filtered)
 				broadcastMessageRE:FireAllClients({
 					scope = "global",
 					userId = player.UserId,
@@ -496,9 +498,15 @@ if not mount then
 end
 assert(mount:IsA("Frame"), "[IGCS] IGCSReactMount must be a Frame.")
 
--- Hide the visual shell of native chat, not its transport. CMain's normal-chat
--- forwarding still reaches the default channel for systems that observe it.
-for _, configurationName in { "ChatWindowConfiguration", "ChatInputBarConfiguration", "ChannelTabsConfiguration" } do
+-- Hide the visual shell of native chat, not its transport. Admin-prefixed input
+-- still reaches RBXGeneral / legacy SayMessageRequest so tools can observe it,
+-- but native TextChat bubbles are off so only IGCS Chat:Chat bubbles show.
+for _, configurationName in {
+	"ChatWindowConfiguration",
+	"ChatInputBarConfiguration",
+	"ChannelTabsConfiguration",
+	"BubbleChatConfiguration",
+} do
 	local configuration = TextChatService:FindFirstChild(configurationName)
 	if configuration then
 		pcall(function()
@@ -506,6 +514,12 @@ for _, configurationName in { "ChatWindowConfiguration", "ChatInputBarConfigurat
 		end)
 	end
 end
+
+-- Legacy bubble path (SayMessageRequest) can still draw its own bubbles. Keep
+-- IGCS as the single visual bubble source when the property is writable.
+pcall(function()
+	game:GetService("Chat").BubbleChatEnabled = false
+end)
 
 -- Keep the v1.4 normal-chat fallback alive. It is transport compatibility,
 -- not the deleted IGCS_RunCommand/Adonis API.
@@ -1452,8 +1466,9 @@ local function playEmote(name: string): boolean
 end
 
 function CommandAdapter.forwardToNormalHiddenChat(message: string)
-	-- Preserve the current compatibility order: legacy defaults first, then the
-	-- modern RBXGeneral channel. The normal UI is hidden by ReactChat.client.
+	-- Transport only: fire default chat so admin systems still see the message.
+	-- Visual bubbles are owned by IGCS (server bubbleChatForPlayer). ReactChat
+	-- disables TextChat BubbleChatConfiguration and legacy BubbleChatEnabled.
 	local legacyEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
 	local sayRequest = legacyEvents and legacyEvents:FindFirstChild("SayMessageRequest")
 	if sayRequest and sayRequest:IsA("RemoteEvent") then

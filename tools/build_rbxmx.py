@@ -171,11 +171,13 @@ def remove_adonis_bridge(content: ET.Element) -> None:
     if source_node is None or source_node.text is None:
         raise RuntimeError("ChatServer.server has no source")
 
-    replacement = '''\t\t-- Admin commands already pass through hidden normal chat on the client.
-\t\t-- Do not call an Adonis or BindableEvent API from IGCS.
+    replacement = '''\t\t-- Admin commands still hit hidden normal chat on the client (transport
+\t\t-- for admin tools). Do not call an Adonis or BindableEvent API from IGCS.
+\t\t-- Bubbles use the same IGCS Chat:Chat path as global chat for consistency.
 \t\tif parsed.kind == "admin" then
 \t\t\tlocal filtered = filterForBroadcast(player, parsed.message)
 \t\t\tif filtered then
+\t\t\t\tbubbleChatForPlayer(player, filtered)
 \t\t\t\tbroadcastMessageRE:FireAllClients({
 \t\t\t\t\tscope = "global",
 \t\t\t\t\tuserId = player.UserId,

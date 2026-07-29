@@ -108,8 +108,9 @@ local function playEmote(name: string): boolean
 end
 
 function CommandAdapter.forwardToNormalHiddenChat(message: string)
-	-- Preserve the current compatibility order: legacy defaults first, then the
-	-- modern RBXGeneral channel. The normal UI is hidden by ReactChat.client.
+	-- Transport only: fire default chat so admin systems still see the message.
+	-- Visual bubbles are owned by IGCS (server bubbleChatForPlayer). ReactChat
+	-- disables TextChat BubbleChatConfiguration and legacy BubbleChatEnabled.
 	local legacyEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
 	local sayRequest = legacyEvents and legacyEvents:FindFirstChild("SayMessageRequest")
 	if sayRequest and sayRequest:IsA("RemoteEvent") then

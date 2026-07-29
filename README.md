@@ -105,7 +105,7 @@ Notes:
 - Visible chat is React-Lua (`src/client/`) instead of the old imperative `OuterFrame` / `CMain` tree.
 - **All** and **Team** tabs in a compact top-left panel (scale size on PC, with a 400×270 minimum).
 - Colors, size, position, and strokes are configurable in shared config (`IGCSConfiguration` / `IGCSConfig`).
-- Adonis admin bridge is gone. Input starting with `:`, `;`, or `!` goes through **hidden normal Roblox chat** first, then the existing IGCS relay for display — so tools that watch default chat still work.
+- Adonis admin bridge is gone. Input starting with `:`, `;`, or `!` goes through **hidden normal Roblox chat** first (transport for admin tools), then the existing IGCS relay for display **and** IGCS bubbles — native TextChat bubbles stay off so bubble style stays consistent.
 - TopbarPlus **Icon** is still required (same as v1.4).
 
 ## Customize the look

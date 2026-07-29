@@ -35,9 +35,15 @@ if not mount then
 end
 assert(mount:IsA("Frame"), "[IGCS] IGCSReactMount must be a Frame.")
 
--- Hide the visual shell of native chat, not its transport. CMain's normal-chat
--- forwarding still reaches the default channel for systems that observe it.
-for _, configurationName in { "ChatWindowConfiguration", "ChatInputBarConfiguration", "ChannelTabsConfiguration" } do
+-- Hide the visual shell of native chat, not its transport. Admin-prefixed input
+-- still reaches RBXGeneral / legacy SayMessageRequest so tools can observe it,
+-- but native TextChat bubbles are off so only IGCS Chat:Chat bubbles show.
+for _, configurationName in {
+	"ChatWindowConfiguration",
+	"ChatInputBarConfiguration",
+	"ChannelTabsConfiguration",
+	"BubbleChatConfiguration",
+} do
 	local configuration = TextChatService:FindFirstChild(configurationName)
 	if configuration then
 		pcall(function()
@@ -45,6 +51,12 @@ for _, configurationName in { "ChatWindowConfiguration", "ChatInputBarConfigurat
 		end)
 	end
 end
+
+-- Legacy bubble path (SayMessageRequest) can still draw its own bubbles. Keep
+-- IGCS as the single visual bubble source when the property is writable.
+pcall(function()
+	game:GetService("Chat").BubbleChatEnabled = false
+end)
 
 -- Keep the v1.4 normal-chat fallback alive. It is transport compatibility,
 -- not the deleted IGCS_RunCommand/Adonis API.

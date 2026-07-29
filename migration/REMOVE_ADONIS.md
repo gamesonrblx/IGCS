@@ -8,5 +8,7 @@ This is the one intentional communication-layer change. Everything else in `Chat
 
 The new React client sends `:`, `;`, and `!` input through the hidden normal chat first, then continues to pass the same input to the existing `SendMessage` relay for IGCS display. There is no `IGCS_RunCommand` BindableEvent, no `Process.Command()` call, and no Adonis plugin API.
 
+Visual bubbles for admin lines use the same IGCS `bubbleChatForPlayer` path as global chat. Native TextChat / legacy bubbles are disabled on the client so you do not get two bubble styles.
+
 Keep `IGCS_TriggerChat` and its client listener. It is the existing normal-chat fallback used when legacy chat forwarding is unavailable; it is **not** an Adonis API.
 
