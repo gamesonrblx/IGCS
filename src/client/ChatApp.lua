@@ -386,14 +386,36 @@ local function ChatApp()
 	end, { broadcastMessage, whisperMessage })
 
 	React.useEffect(function()
-		local connection = UserInputService.InputBegan:Connect(function(input, wasProcessed)
-			if wasProcessed or input.KeyCode ~= Enum.KeyCode.Slash then
+		local connection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+			if input.KeyCode ~= Enum.KeyCode.Slash and input.KeyCode ~= Enum.KeyCode.Oem2 then
 				return
 			end
-			local inputBox = inputRef.current
-			if inputBox and not inputBox:IsFocused() then
-				inputBox:CaptureFocus()
+
+			-- Parent of ChatApp ModuleScript is the IGCS_Client ScreenGui.
+			local gui = script.Parent
+			if not gui:IsA("ScreenGui") then
+				return
 			end
+
+			local function focusComposer()
+				local inputBox = inputRef.current
+				if inputBox and inputBox.Parent and not inputBox:IsFocused() then
+					inputBox:CaptureFocus()
+				end
+			end
+
+			-- Closed panel: open first, then focus. Do not require !gameProcessed —
+			-- other systems often mark "/" as processed while native chat is hidden.
+			if not gui.Enabled then
+				gui.Enabled = true
+				task.defer(focusComposer)
+				return
+			end
+
+			if gameProcessed then
+				return
+			end
+			focusComposer()
 		end)
 		return function()
 			connection:Disconnect()
