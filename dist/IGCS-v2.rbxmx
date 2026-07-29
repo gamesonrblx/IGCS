@@ -250,7 +250,7 @@ function ChatServer.Start()
 			end
 		end
 
-		bubbleChatForPlayer(fromPlayer, "[Team] " .. filteredText)
+		-- Team bubbles are client-local (teammates only); no public Chat:Chat.
 	end
 
 	local function whisper(fromPlayer: Player, toPlayer: Player, filteredTextForTarget: string, filteredTextForSender: string)
@@ -1098,6 +1098,13 @@ local function ChatApp()
 			if not message then
 				return
 			end
+
+			-- Team relay is already teammate-only. Draw the bubble locally (no
+			-- "[Team]" prefix) so non-teammates never see a public Chat:Chat bubble.
+			if message.scope == "team" and not message.isSystem then
+				CommandAdapter.showLocalBubble(message.userId, message.text)
+			end
+
 			setMessages(function(previous: { ChatMessage })
 				local nextMessages = table.clone(previous)
 				table.insert(nextMessages, message)
@@ -1463,6 +1470,39 @@ local function playEmote(name: string): boolean
 		end
 	end)
 	return true
+end
+
+-- Local-only bubble (client call). Used for team chat so non-teammates never
+-- see the bubble; server Chat:Chat would replicate to everyone.
+function CommandAdapter.showLocalBubble(speakerUserId: number?, text: string)
+	if type(speakerUserId) ~= "number" or type(text) ~= "string" or text:match("^%s*$") then
+		return
+	end
+
+	local speaker = Players:GetPlayerByUserId(speakerUserId)
+	if not speaker then
+		return
+	end
+
+	local character = speaker.Character
+	if not character then
+		return
+	end
+
+	local head = character:FindFirstChild("Head")
+	if not head or not head:IsA("BasePart") then
+		return
+	end
+
+	-- Prefer TextChat DisplayBubble (client → this client only). Fallback Chat:Chat.
+	local shown = pcall(function()
+		(TextChatService :: any):DisplayBubble(head, text)
+	end)
+	if not shown then
+		pcall(function()
+			game:GetService("Chat"):Chat(head, text, Enum.ChatColor.White)
+		end)
+	end
 end
 
 function CommandAdapter.forwardToNormalHiddenChat(message: string)

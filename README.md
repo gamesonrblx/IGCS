@@ -97,6 +97,7 @@ That’s it for most games. You do not need Rojo or Wally just to use the built 
 Notes:
 
 - The **Team** tab only appears after the player has joined a team.
+- Team messages and bubbles are **teammate-only** (no public `[Team]` bubble prefix).
 - System lines (join/leave summaries, age notices, etc.) are not shown in the IGCS panel.
 - Roblox text filtering still runs on the server — do not strip it out.
 

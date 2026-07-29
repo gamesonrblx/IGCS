@@ -367,6 +367,13 @@ local function ChatApp()
 			if not message then
 				return
 			end
+
+			-- Team relay is already teammate-only. Draw the bubble locally (no
+			-- "[Team]" prefix) so non-teammates never see a public Chat:Chat bubble.
+			if message.scope == "team" and not message.isSystem then
+				CommandAdapter.showLocalBubble(message.userId, message.text)
+			end
+
 			setMessages(function(previous: { ChatMessage })
 				local nextMessages = table.clone(previous)
 				table.insert(nextMessages, message)

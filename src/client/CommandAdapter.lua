@@ -107,6 +107,39 @@ local function playEmote(name: string): boolean
 	return true
 end
 
+-- Local-only bubble (client call). Used for team chat so non-teammates never
+-- see the bubble; server Chat:Chat would replicate to everyone.
+function CommandAdapter.showLocalBubble(speakerUserId: number?, text: string)
+	if type(speakerUserId) ~= "number" or type(text) ~= "string" or text:match("^%s*$") then
+		return
+	end
+
+	local speaker = Players:GetPlayerByUserId(speakerUserId)
+	if not speaker then
+		return
+	end
+
+	local character = speaker.Character
+	if not character then
+		return
+	end
+
+	local head = character:FindFirstChild("Head")
+	if not head or not head:IsA("BasePart") then
+		return
+	end
+
+	-- Prefer TextChat DisplayBubble (client → this client only). Fallback Chat:Chat.
+	local shown = pcall(function()
+		(TextChatService :: any):DisplayBubble(head, text)
+	end)
+	if not shown then
+		pcall(function()
+			game:GetService("Chat"):Chat(head, text, Enum.ChatColor.White)
+		end)
+	end
+end
+
 function CommandAdapter.forwardToNormalHiddenChat(message: string)
 	-- Transport only: fire default chat so admin systems still see the message.
 	-- Visual bubbles are owned by IGCS (server bubbleChatForPlayer). ReactChat

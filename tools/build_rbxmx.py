@@ -208,6 +208,30 @@ def remove_adonis_bridge(content: ET.Element) -> None:
     source_node.text = source
 
 
+def fix_team_bubbles_teammate_only(content: ET.Element) -> None:
+    """Team chat already fans out only to teammates via WhisperMessage.
+
+    The old server bubble used Chat:Chat with a \"[Team] \" prefix, which is
+    visible to every client near the speaker. Drop the server bubble; the React
+    client draws a local bubble (no prefix) only for clients that receive the
+    team payload.
+    """
+    chat_server = child_named(content, "ChatServer.server")
+    source_node = property_node(chat_server, "ProtectedString", "Source")
+    if source_node is None or source_node.text is None:
+        raise RuntimeError("ChatServer.server has no source")
+
+    source, substitutions = re.subn(
+        r'\n\t+bubbleChatForPlayer\(fromPlayer, "\[Team\] " \.\. filteredText\)\n',
+        "\n\t\t-- Team bubbles are client-local (teammates only); no public Chat:Chat.\n",
+        source_node.text,
+        count=1,
+    )
+    if substitutions != 1:
+        raise RuntimeError("Couldn't remove the public [Team] bubbleChatForPlayer call")
+    source_node.text = source
+
+
 def prevent_duplicate_normal_chat_bubbles(content: ET.Element) -> None:
     chat_server = child_named(content, "ChatServer.server")
     source_node = property_node(chat_server, "ProtectedString", "Source")
@@ -281,6 +305,7 @@ def build(output: Path, include_packages: bool) -> None:
     replace_configuration(igcs)
     remove_adonis_bridge(content)
     prevent_duplicate_normal_chat_bubbles(content)
+    fix_team_bubbles_teammate_only(content)
     remove_children_named(content, "Packages")
     packages = build_directory(PACKAGES, "Packages") if include_packages else None
     if packages is not None:
