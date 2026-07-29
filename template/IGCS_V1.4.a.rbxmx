@@ -1,0 +1,1185 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<Meta name="ExplicitAutoJoints">true</Meta>
+	<External>null</External>
+	<External>nil</External>
+	<Item class="Folder" referent="RBXDF7BDE05F87447DEB7282162917BE608">
+		<Properties>
+			<BinaryString name="AttributesSerialize">AgAAAAQAAABEYXRlAgsAAAAxMyBKQU4gMjAyNgcAAABWZXJzaW9uAgUAAAAxLjQuMA==</BinaryString>
+			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+			<bool name="DefinesCapabilities">false</bool>
+			<string name="Name">IGCS</string>
+			<int64 name="SourceAssetId">-1</int64>
+			<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+		</Properties>
+		<Item class="Folder" referent="RBX2543B0EE03BA4F1587253902F8A318F4">
+			<Properties>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">Content</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+			<Item class="ModuleScript" referent="RBX2E2F8F5504C64C9784FA2EE9A3F6926E">
+				<Properties>
+					<Content name="LinkedSource"><null></null></Content>
+					<ProtectedString name="Source"><![CDATA[--[[
+
+  _____ _____  _____  _____
+ |_   _/ ____|/ ____|/ ____|
+   | || |  __| |    | (___
+   | || | |_ | |     \___ \
+  _| || |__| | |____ ____) |
+ |_____\_____|\_____|_____/
+
+ IGCS ??In-Game Chat System
+
+]]
+
+-- ChatServer.server (ModuleScript)
+-- Global, team, and whisper chat relay + bubble chat
+-- Compatible with TextChatService for admin commands (HD Admin, Adonis, etc.)
+
+local ChatServer = {}
+
+function ChatServer.Start()
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local Players = game:GetService("Players")
+	local StarterGui = game:GetService("StarterGui")
+	local TextService = game:GetService("TextService")
+	local TextChatService = game:GetService("TextChatService")
+	local ChatService = game:GetService("Chat")
+
+	-- Disable Roblox default chat UI (server-side; client disable still recommended)
+	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false)
+
+	-- Remotes
+	local remotesFolder = ReplicatedStorage:WaitForChild("IGCS_Remotes")
+	local sendMessageRE = remotesFolder:WaitForChild("SendMessage")
+	local broadcastMessageRE = remotesFolder:WaitForChild("BroadcastMessage")
+	local whisperMessageRE = remotesFolder:WaitForChild("WhisperMessage")
+
+	-- Rate limit
+	local lastSentAt: {[Player]: number} = {}
+	local COOLDOWN = 0.35
+
+	-- =====================================================
+	-- ADMIN COMMAND PREFIXES
+	-- Commands starting with these are passed to TextChatService
+	-- =====================================================
+	local ADMIN_PREFIXES = {
+		":",  -- HD Admin, Adonis default
+		";",  -- Alternative prefix
+		"!",  -- Some admin systems use this
+	}
+
+	local function isAdminCommand(text: string): boolean
+		if not text or text == "" then return false end
+		local firstChar = text:sub(1, 1)
+		for _, prefix in ipairs(ADMIN_PREFIXES) do
+			if firstChar == prefix then
+				return true
+			end
+		end
+		return false
+	end
+
+	-- =====================================================
+	-- UTILITIES
+	-- =====================================================
+	local function clampText(rawText: string, maxLen: number): string
+		rawText = tostring(rawText or "")
+		rawText = rawText:gsub("\r", ""):gsub("\n", "")
+		return rawText:sub(1, maxLen)
+	end
+
+	local function isBlank(s: string): boolean
+		return (s == nil) or s:match("^%s*$") ~= nil
+	end
+
+	local function filterForBroadcast(fromPlayer: Player, rawText: string): string?
+		rawText = clampText(rawText, 200)
+		if isBlank(rawText) then return nil end
+
+		local ok, filtered = pcall(function()
+			local result = TextService:FilterStringAsync(rawText, fromPlayer.UserId)
+			return result:GetNonChatStringForBroadcastAsync()
+		end)
+
+		if not ok then return nil end
+		return filtered
+	end
+
+	local function filterForUser(fromPlayer: Player, rawText: string, targetUserId: number): string?
+		rawText = clampText(rawText, 200)
+		if isBlank(rawText) then return nil end
+
+		local ok, filtered = pcall(function()
+			local result = TextService:FilterStringAsync(rawText, fromPlayer.UserId)
+			return result:GetNonChatStringForUserAsync(targetUserId)
+		end)
+
+		if not ok then return nil end
+		return filtered
+	end
+
+	local function bubbleChatForPlayer(player: Player, filteredText: string)
+		local character = player.Character
+		if not character then return end
+
+		local head = character:FindFirstChild("Head")
+		if not head or not head:IsA("BasePart") then return end
+
+		pcall(function()
+			ChatService:Chat(head, filteredText, Enum.ChatColor.Blue)
+		end)
+	end
+
+	-- =====================================================
+	-- CHAT SYSTEM BRIDGE
+	-- Forward messages to trigger Player.Chatted for admin systems
+	-- =====================================================
+
+	-- Create a RemoteEvent for client to send admin commands through TextChatService
+	local adminCommandRE = Instance.new("RemoteEvent")
+	adminCommandRE.Name = "IGCS_TriggerChat"
+	adminCommandRE.Parent = remotesFolder
+
+	local function forwardToLegacyChat(player: Player, message: string)
+		local forwarded = false
+
+		-- Method 1: Try legacy ChatService (if available)
+		pcall(function()
+			local ServerScriptService = game:GetService("ServerScriptService")
+			local ChatServiceRunner = ServerScriptService:FindFirstChild("ChatServiceRunner")
+			if ChatServiceRunner then
+				local ChatServiceModule = require(ChatServiceRunner:WaitForChild("ChatService"))
+				local speaker = ChatServiceModule:GetSpeaker(player.Name)
+				if speaker then
+					speaker:SayMessage(message, "All")
+					print("[IGCS] Forwarded via legacy ChatService")
+					forwarded = true
+				end
+			end
+		end)
+
+		if forwarded then return true end
+
+		-- Method 2: Tell client to send through TextChatService
+		-- This will trigger Player.Chatted on their end
+		adminCommandRE:FireClient(player, message)
+		print("[IGCS] Requested client to send via TextChatService")
+
+		return false -- Return false so bubble chat still works as fallback
+	end
+
+	local function findPlayerByNamePrefix(nameOrPrefix: string): Player?
+		nameOrPrefix = tostring(nameOrPrefix or "")
+		if nameOrPrefix == "" then return nil end
+
+		local lower = nameOrPrefix:lower()
+		local exact = Players:FindFirstChild(nameOrPrefix)
+		if exact and exact:IsA("Player") then
+			return exact
+		end
+
+		-- Prefix match (username OR display name)
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr.Name:lower():sub(1, #lower) == lower then
+				return plr
+			end
+			if plr.DisplayName and plr.DisplayName:lower():sub(1, #lower) == lower then
+				return plr
+			end
+		end
+		return nil
+	end
+
+	-- =====================================================
+	-- MESSAGE ROUTING
+	-- =====================================================
+	local function sendSystemToPlayer(plr: Player, text: string)
+		whisperMessageRE:FireClient(plr, {
+			system = true,
+			scope = "system",
+			text = text,
+			t = os.time(),
+		})
+	end
+
+	local function broadcastGlobal(fromPlayer: Player, filteredText: string)
+		-- Mark as processed so TextChatBridge doesn't duplicate it
+		if _G.IGCS and _G.IGCS.Bridge and _G.IGCS.Bridge.markProcessed then
+			_G.IGCS.Bridge.markProcessed(fromPlayer.UserId, filteredText)
+		end
+
+		-- Forward ALL messages to legacy chat system (triggers Player.Chatted for Adonis)
+		-- This also creates bubble chat if successful
+		local legacyWorked = forwardToLegacyChat(fromPlayer, filteredText)
+
+		broadcastMessageRE:FireAllClients({
+			scope = "global",
+			userId = fromPlayer.UserId,
+			displayName = fromPlayer.DisplayName,
+			username = fromPlayer.Name,
+			text = filteredText,
+			system = false,
+			t = os.time(),
+		})
+
+		-- Only create bubble manually if legacy chat didn't work
+		-- (legacy chat creates its own bubble)
+		if not legacyWorked then
+			bubbleChatForPlayer(fromPlayer, filteredText)
+		end
+	end
+
+	local function broadcastTeam(fromPlayer: Player, filteredText: string)
+		local team = fromPlayer.Team
+		if not team then
+			sendSystemToPlayer(fromPlayer, "You are not on a team.")
+			return
+		end
+
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr.Team == team then
+				whisperMessageRE:FireClient(plr, {
+					scope = "team",
+					teamName = team.Name,
+					userId = fromPlayer.UserId,
+					displayName = fromPlayer.DisplayName,
+					username = fromPlayer.Name,
+					text = filteredText,
+					system = false,
+					t = os.time(),
+				})
+			end
+		end
+
+		bubbleChatForPlayer(fromPlayer, "[Team] " .. filteredText)
+	end
+
+	local function whisper(fromPlayer: Player, toPlayer: Player, filteredTextForTarget: string, filteredTextForSender: string)
+		-- Send to target
+		whisperMessageRE:FireClient(toPlayer, {
+			scope = "whisper",
+			fromUserId = fromPlayer.UserId,
+			fromDisplayName = fromPlayer.DisplayName,
+			fromUsername = fromPlayer.Name,
+			toUserId = toPlayer.UserId,
+			toDisplayName = toPlayer.DisplayName,
+			toUsername = toPlayer.Name,
+			text = filteredTextForTarget,
+			system = false,
+			t = os.time(),
+		})
+
+		-- Echo to sender
+		whisperMessageRE:FireClient(fromPlayer, {
+			scope = "whisper",
+			fromUserId = fromPlayer.UserId,
+			fromDisplayName = fromPlayer.DisplayName,
+			fromUsername = fromPlayer.Name,
+			toUserId = toPlayer.UserId,
+			toDisplayName = toPlayer.DisplayName,
+			toUsername = toPlayer.Name,
+			text = filteredTextForSender,
+			system = false,
+			t = os.time(),
+			echo = true,
+		})
+	end
+
+	-- =====================================================
+	-- COMMAND PARSING
+	-- =====================================================
+	local function parseChat(rawText: string)
+		rawText = clampText(rawText, 200)
+		local trimmed = rawText:match("^%s*(.-)%s*$") or ""
+		if trimmed == "" then
+			return { kind = "empty" }
+		end
+
+		-- Check for admin commands first
+		if isAdminCommand(trimmed) then
+			return { kind = "admin", message = trimmed }
+		end
+
+		-- /t message  | /team message
+		do
+			local teamMsg = trimmed:match("^/t%s+(.+)$") or trimmed:match("^/team%s+(.+)$")
+			if teamMsg then
+				return { kind = "team", message = teamMsg }
+			end
+		end
+
+		-- /w name message | /pm name message | /whisper name message
+		do
+			local target, msg =
+				trimmed:match("^/w%s+(%S+)%s+(.+)$")
+				or trimmed:match("^/pm%s+(%S+)%s+(.+)$")
+				or trimmed:match("^/whisper%s+(%S+)%s+(.+)$")
+
+			if target and msg then
+				return { kind = "whisper", target = target, message = msg }
+			end
+		end
+
+		-- /e and /emote are handled client-side, but if they reach server, ignore
+		if trimmed:match("^/e%s+") or trimmed:match("^/emote%s+") then
+			return { kind = "emote" } -- Client-side only
+		end
+
+		return { kind = "global", message = trimmed }
+	end
+
+	-- =====================================================
+	-- MAIN HANDLER
+	-- =====================================================
+	sendMessageRE.OnServerEvent:Connect(function(player: Player, rawText: any)
+		local now = os.clock()
+		local last = lastSentAt[player] or 0
+		if now - last < COOLDOWN then
+			return
+		end
+		lastSentAt[player] = now
+
+		local parsed = parseChat(tostring(rawText or ""))
+		if parsed.kind == "empty" then
+			return
+		end
+
+		-- Admin commands - fire to Adonis plugin via BindableEvent
+		if parsed.kind == "admin" then
+			local commandRan = false
+
+			-- Try IGCS_RunCommand BindableEvent (created by Adonis plugin)
+			local runCommandEvent = remotesFolder:FindFirstChild("IGCS_RunCommand")
+			if runCommandEvent and runCommandEvent:IsA("BindableEvent") then
+				local success, err = pcall(function()
+					runCommandEvent:Fire(player, parsed.message)
+				end)
+				if success then
+					print("[IGCS] Fired command to Adonis plugin")
+					commandRan = true
+				else
+					warn("[IGCS] Failed to fire to Adonis:", err)
+				end
+			else
+				print("[IGCS] IGCS_RunCommand not found - is Adonis plugin installed?")
+				-- Fallback: try legacy chat
+				forwardToLegacyChat(player, parsed.message)
+			end
+
+			-- Show in IGCS chat
+			local filtered = filterForBroadcast(player, parsed.message)
+			if filtered then
+				if _G.IGCS and _G.IGCS.Bridge and _G.IGCS.Bridge.markProcessed then
+					_G.IGCS.Bridge.markProcessed(player.UserId, filtered)
+				end
+
+				broadcastMessageRE:FireAllClients({
+					scope = "global",
+					userId = player.UserId,
+					displayName = player.DisplayName,
+					username = player.Name,
+					text = filtered,
+					system = false,
+					t = os.time(),
+				})
+			end
+
+			return
+		end
+
+		-- Emote commands are client-side only
+		if parsed.kind == "emote" then
+			return
+		end
+
+		if parsed.kind == "team" then
+			local filtered = filterForBroadcast(player, parsed.message)
+			if not filtered then return end
+			broadcastTeam(player, filtered)
+			return
+		end
+
+		if parsed.kind == "whisper" then
+			local toPlayer = findPlayerByNamePrefix(parsed.target)
+			if not toPlayer then
+				sendSystemToPlayer(player, ("Could not find player: %s"):format(parsed.target))
+				return
+			end
+			if toPlayer == player then
+				sendSystemToPlayer(player, "You can't whisper yourself.")
+				return
+			end
+
+			local filteredForTarget = filterForUser(player, parsed.message, toPlayer.UserId)
+			local filteredForSender = filterForUser(player, parsed.message, player.UserId)
+			if not filteredForTarget or not filteredForSender then return end
+
+			whisper(player, toPlayer, filteredForTarget, filteredForSender)
+			return
+		end
+
+		-- Global chat
+		local filtered = filterForBroadcast(player, parsed.message)
+		if not filtered then return end
+		broadcastGlobal(player, filtered)
+	end)
+
+	-- =====================================================
+	-- PLAYER EVENTS
+	-- =====================================================
+	Players.PlayerAdded:Connect(function(plr)
+		broadcastMessageRE:FireAllClients({
+			system = true,
+			scope = "system",
+			text = plr.DisplayName .. " joined.",
+			t = os.time(),
+		})
+	end)
+
+	Players.PlayerRemoving:Connect(function(plr)
+		broadcastMessageRE:FireAllClients({
+			system = true,
+			scope = "system",
+			text = plr.DisplayName .. " left.",
+			t = os.time(),
+		})
+		lastSentAt[plr] = nil
+	end)
+
+	print("[IGCS ChatServer] Started with TextChatService integration for admin commands.")
+end
+
+return ChatServer
+]]></ProtectedString>
+					<string name="ScriptGuid">{520AFBBE-0481-45AA-A349-B46DB3053B8D}</string>
+					<BinaryString name="AttributesSerialize"></BinaryString>
+					<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+					<bool name="DefinesCapabilities">false</bool>
+					<string name="Name">ChatServer.server</string>
+					<int64 name="SourceAssetId">-1</int64>
+					<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+				</Properties>
+			</Item>
+			<Item class="ScreenGui" referent="RBXF5FAE77F9E5A44A3A47DD3336A30417A">
+				<Properties>
+					<bool name="ClipToDeviceSafeArea">true</bool>
+					<int name="DisplayOrder">0</int>
+					<token name="SafeAreaCompatibility">1</token>
+					<token name="ScreenInsets">2</token>
+					<bool name="Enabled">true</bool>
+					<bool name="ResetOnSpawn">false</bool>
+					<token name="ZIndexBehavior">1</token>
+					<bool name="AutoLocalize">true</bool>
+					<Ref name="RootLocalizationTable">null</Ref>
+					<token name="SelectionBehaviorDown">0</token>
+					<token name="SelectionBehaviorLeft">0</token>
+					<token name="SelectionBehaviorRight">0</token>
+					<token name="SelectionBehaviorUp">0</token>
+					<bool name="SelectionGroup">false</bool>
+					<BinaryString name="AttributesSerialize"></BinaryString>
+					<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+					<bool name="DefinesCapabilities">false</bool>
+					<string name="Name">IGCS_Client</string>
+					<int64 name="SourceAssetId">-1</int64>
+					<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+				</Properties>
+				<Item class="Frame" referent="RBX2DE6BCF667DE443CB1691863D582907D">
+					<Properties>
+						<token name="Style">0</token>
+						<bool name="Active">false</bool>
+						<Vector2 name="AnchorPoint">
+							<X>0.0250000004</X>
+							<Y>0.0199999996</Y>
+						</Vector2>
+						<token name="AutomaticSize">0</token>
+						<Color3 name="BackgroundColor3">
+							<R>0</R>
+							<G>0</G>
+							<B>0</B>
+						</Color3>
+						<float name="BackgroundTransparency">0.699999988</float>
+						<Color3 name="BorderColor3">
+							<R>0</R>
+							<G>0</G>
+							<B>0</B>
+						</Color3>
+						<token name="BorderMode">0</token>
+						<int name="BorderSizePixel">0</int>
+						<bool name="ClipsDescendants">false</bool>
+						<bool name="Draggable">false</bool>
+						<token name="InputSink">0</token>
+						<bool name="Interactable">true</bool>
+						<int name="LayoutOrder">0</int>
+						<Ref name="NextSelectionDown">null</Ref>
+						<Ref name="NextSelectionLeft">null</Ref>
+						<Ref name="NextSelectionRight">null</Ref>
+						<Ref name="NextSelectionUp">null</Ref>
+						<UDim2 name="Position">
+							<XS>0.0250000004</XS>
+							<XO>0</XO>
+							<YS>0.0199999996</YS>
+							<YO>0</YO>
+						</UDim2>
+						<float name="Rotation">0</float>
+						<bool name="Selectable">false</bool>
+						<Ref name="SelectionImageObject">null</Ref>
+						<int name="SelectionOrder">0</int>
+						<UDim2 name="Size">
+							<XS>0.330812871</XS>
+							<XO>0</XO>
+							<YS>0.393048137</YS>
+							<YO>0</YO>
+						</UDim2>
+						<token name="SizeConstraint">0</token>
+						<bool name="Visible">true</bool>
+						<int name="ZIndex">1</int>
+						<bool name="AutoLocalize">true</bool>
+						<Ref name="RootLocalizationTable">null</Ref>
+						<token name="SelectionBehaviorDown">0</token>
+						<token name="SelectionBehaviorLeft">0</token>
+						<token name="SelectionBehaviorRight">0</token>
+						<token name="SelectionBehaviorUp">0</token>
+						<bool name="SelectionGroup">false</bool>
+						<BinaryString name="AttributesSerialize"></BinaryString>
+						<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+						<bool name="DefinesCapabilities">false</bool>
+						<string name="Name">OuterFrame</string>
+						<int64 name="SourceAssetId">-1</int64>
+						<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+					</Properties>
+					<Item class="UICorner" referent="RBXA8B2E773BDE5414988A63DDA024676EB">
+						<Properties>
+							<UDim name="BottomLeftRadius">
+								<S>0.0285714287</S>
+								<O>0</O>
+							</UDim>
+							<UDim name="BottomRightRadius">
+								<S>0.0285714287</S>
+								<O>0</O>
+							</UDim>
+							<UDim name="TopLeftRadius">
+								<S>0.0285714287</S>
+								<O>0</O>
+							</UDim>
+							<UDim name="TopRightRadius">
+								<S>0.0285714287</S>
+								<O>0</O>
+							</UDim>
+							<BinaryString name="AttributesSerialize"></BinaryString>
+							<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+							<bool name="DefinesCapabilities">false</bool>
+							<string name="Name">UICorner</string>
+							<int64 name="SourceAssetId">-1</int64>
+							<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+						</Properties>
+					</Item>
+					<Item class="Frame" referent="RBX7496DAEF54FA417CB91E2A717BB04BCE">
+						<Properties>
+							<token name="Style">0</token>
+							<bool name="Active">false</bool>
+							<Vector2 name="AnchorPoint">
+								<X>0.5</X>
+								<Y>0</Y>
+							</Vector2>
+							<token name="AutomaticSize">0</token>
+							<Color3 name="BackgroundColor3">
+								<R>1</R>
+								<G>1</G>
+								<B>1</B>
+							</Color3>
+							<float name="BackgroundTransparency">0.5</float>
+							<Color3 name="BorderColor3">
+								<R>0</R>
+								<G>0</G>
+								<B>0</B>
+							</Color3>
+							<token name="BorderMode">0</token>
+							<int name="BorderSizePixel">0</int>
+							<bool name="ClipsDescendants">false</bool>
+							<bool name="Draggable">false</bool>
+							<token name="InputSink">0</token>
+							<bool name="Interactable">true</bool>
+							<int name="LayoutOrder…61667 tokens truncated…
+				local addedLine = OriginalTraceback
+				warn("-------- Janitor Error --------".."\n"..tostring(warning).."\n"..cleanupLine..""..addedLine)
+			end
+			if MethodName == true then
+				local success, warning = pcall(Object)
+				if not success then
+					warnUser(warning)
+				end
+			else
+				local ObjectMethod = Object[MethodName]
+				if ObjectMethod then
+					local success, warning = pcall(ObjectMethod, Object)
+					local isAnInstanceBeingDestroyed = typeof(Object) == "Instance" and ObjectMethod == "Destroy"
+					if not success and not isAnInstanceBeingDestroyed then
+						warnUser(warning)
+					end
+				end
+			end
+
+			self[Object] = nil
+		end
+
+		local This = self[IndicesReference]
+		if This then
+			for Index in next, This do
+				This[Index] = nil
+			end
+
+			self[IndicesReference] = {}
+		end
+
+		self.CurrentlyCleaning = false
+	end
+end
+
+Janitor.__index.Clean = Janitor.__index.Cleanup
+
+function Janitor.__index:Destroy()
+	self:Cleanup()
+	--table.clear(self)
+	--setmetatable(self, nil)
+end
+
+Janitor.__call = Janitor.__index.Cleanup
+
+local Disconnect = {Connected = true}
+Disconnect.__index = Disconnect
+function Disconnect:Disconnect()
+	if self.Connected then
+		self.Connected = false
+		self.Connection:Disconnect()
+	end
+end
+
+function Disconnect:__tostring()
+	return "Disconnect<" .. tostring(self.Connected) .. ">"
+end
+
+function Janitor.__index:LinkToInstance(Object, AllowMultiple)
+	local Connection
+	local IndexToUse = AllowMultiple and newproxy(false) or LinkToInstanceIndex
+	local IsNilParented = Object.Parent == nil
+	local ManualDisconnect = setmetatable({}, Disconnect)
+
+	local function ChangedFunction(_DoNotUse, NewParent)
+		if ManualDisconnect.Connected then
+			_DoNotUse = nil
+			IsNilParented = NewParent == nil
+
+			if IsNilParented then
+				coroutine.wrap(function()
+					Heartbeat:Wait()
+					if not ManualDisconnect.Connected then
+						return
+					elseif not Connection.Connected then
+						self:Cleanup()
+					else
+						while IsNilParented and Connection.Connected and ManualDisconnect.Connected do
+							Heartbeat:Wait()
+						end
+
+						if ManualDisconnect.Connected and IsNilParented then
+							self:Cleanup()
+						end
+					end
+				end)()
+			end
+		end
+	end
+
+	Connection = Object.AncestryChanged:Connect(ChangedFunction)
+	ManualDisconnect.Connection = Connection
+
+	if IsNilParented then
+		ChangedFunction(nil, Object.Parent)
+	end
+
+	Object = nil
+	return self:Add(ManualDisconnect, "Disconnect", IndexToUse)
+end
+
+function Janitor.__index:LinkToInstances(...)
+	local ManualCleanup = Janitor.new()
+	for _, Object in ipairs({...}) do
+		ManualCleanup:Add(self:LinkToInstance(Object, true), "Disconnect")
+	end
+
+	return ManualCleanup
+end
+
+for FunctionName, Function in next, Janitor.__index do
+	local NewFunctionName = string.sub(string.lower(FunctionName), 1, 1) .. string.sub(FunctionName, 2)
+	Janitor.__index[NewFunctionName] = Function
+end
+
+return Janitor]]></ProtectedString>
+							<string name="ScriptGuid">{A0547756-60D7-4778-BFAA-48B831DBAF2B}</string>
+							<BinaryString name="AttributesSerialize"></BinaryString>
+							<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+							<bool name="DefinesCapabilities">false</bool>
+							<string name="Name">Janitor</string>
+							<int64 name="SourceAssetId">-1</int64>
+							<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+						</Properties>
+					</Item>
+				</Item>
+			</Item>
+			<Item class="ModuleScript" referent="RBX072DEDA61B7D4673827A8697E6CE8432">
+				<Properties>
+					<Content name="LinkedSource"><null></null></Content>
+					<ProtectedString name="Source"><![CDATA[--[[
+
+  _____ _____  _____  _____
+ |_   _/ ____|/ ____|/ ____|
+   | || |  __| |    | (___
+   | || | |_ | |     \___ \
+  _| || |__| | |____ ____) |
+ |_____\_____|\_____|_____/
+
+ IGCS ??In-Game Chat System
+
+
+    IGCS_AdminBridge
+    Shared ModuleScript for routing IGCS commands to Adonis/HD Admin
+    Place in: ReplicatedStorage
+
+    Child:
+      - Server-IGCS_AdonisPlugin (auto-placed to Adonis_Loader > Config > Plugins)
+   
+]]
+
+local IGCS_AdminBridge = {}
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Get or create the command BindableEvent
+local function getOrCreateCommandEvent()
+	local remotesFolder = ReplicatedStorage:FindFirstChild("IGCS_Remotes")
+	if not remotesFolder then
+		remotesFolder = Instance.new("Folder")
+		remotesFolder.Name = "IGCS_Remotes"
+		remotesFolder.Parent = ReplicatedStorage
+	end
+
+	local commandEvent = remotesFolder:FindFirstChild("IGCS_RunCommand")
+	if not commandEvent then
+		commandEvent = Instance.new("BindableEvent")
+		commandEvent.Name = "IGCS_RunCommand"
+		commandEvent.Parent = remotesFolder
+	end
+
+	return commandEvent
+end
+
+-- Hook into Adonis admin system
+function IGCS_AdminBridge.HookAdonis(Vargs)
+	local server = Vargs.Server
+	local Process = server.Process
+	local commandEvent = getOrCreateCommandEvent()
+
+	commandEvent.Event:Connect(function(player, message)
+		if player and message then
+			Process.Command(player, message, {})
+			print("[IGCS Bridge] Routed command to Adonis:", message)
+		end
+	end)
+
+	print("[IGCS Bridge] Adonis hook established")
+	return true
+end
+
+return IGCS_AdminBridge
+]]></ProtectedString>
+					<string name="ScriptGuid">{52457424-EE38-4EC9-BC1A-6CB051BA2C44}</string>
+					<BinaryString name="AttributesSerialize"></BinaryString>
+					<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+					<bool name="DefinesCapabilities">false</bool>
+					<string name="Name">IGCS_AdminBridge</string>
+					<int64 name="SourceAssetId">-1</int64>
+					<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+				</Properties>
+				<Item class="ModuleScript" referent="RBX60B6FAC471CE4FCFA7F29365E4402E7C">
+					<Properties>
+						<Content name="LinkedSource"><null></null></Content>
+						<ProtectedString name="Source"><![CDATA[--[[
+
+  _____ _____  _____  _____
+ |_   _/ ____|/ ____|/ ____|
+   | || |  __| |    | (___
+   | || | |_ | |     \___ \
+  _| || |__| | |____ ____) |
+ |_____\_____|\_____|_____/
+
+ IGCS ??In-Game Chat System
+
+    Server-IGCS_AdonisPlugin
+    Child of IGCS_AdminBridge - auto-placed to Adonis_Loader > Config > Plugins
+]]
+
+return function(Vargs)
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+	local bridgeModule = ReplicatedStorage:WaitForChild("IGCS_AdminBridge", 10)
+	if not bridgeModule then
+		warn("[IGCS] Could not find IGCS_AdminBridge in ReplicatedStorage")
+		return
+	end
+
+	local Bridge = require(bridgeModule)
+	Bridge.HookAdonis(Vargs)
+
+	print("[IGCS] Adonis plugin loaded successfully")
+end
+]]></ProtectedString>
+						<string name="ScriptGuid">{FF39156A-2692-487B-BD70-2E033B4F8A1C}</string>
+						<BinaryString name="AttributesSerialize"></BinaryString>
+						<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+						<bool name="DefinesCapabilities">false</bool>
+						<string name="Name">Server-IGCS_AdonisPlugin</string>
+						<int64 name="SourceAssetId">-1</int64>
+						<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+					</Properties>
+				</Item>
+			</Item>
+		</Item>
+		<Item class="Script" referent="RBX262559EAEABC49ACA3C1EB755EE904EF">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[--[[
+
+  _____ _____  _____  _____ 
+ |_   _/ ____|/ ____|/ ____|
+   | || |  __| |    | (___  
+   | || | |_ | |     \___ \ 
+  _| || |__| | |____ ____) |
+ |_____\_____|\_____|_____/ 
+                            
+ IGCS ??In-Game Chat System
+
+]]
+
+-- INITALISE
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local StarterGuiService = game:GetService("StarterGui")
+
+local igcsRoot = script.Parent
+local content = igcsRoot:WaitForChild("Content")
+
+local function must(parent: Instance, name: string): Instance
+	local obj = parent:FindFirstChild(name)
+	assert(obj, (`[IGCS Initialise] Missing "{name}" under {parent:GetFullName()}`))
+	return obj
+end
+
+local function ensureFolder(parent: Instance, name: string): Folder
+	local f = parent:FindFirstChild(name)
+	if not f then
+		f = Instance.new("Folder")
+		f.Name = name
+		f.Parent = parent
+	end
+	return f
+end
+
+local function ensureRemoteEvent(parent: Instance, name: string): RemoteEvent
+	local r = parent:FindFirstChild(name)
+	if not r then
+		r = Instance.new("RemoteEvent")
+		r.Name = name
+		r.Parent = parent
+	end
+	return r
+end
+
+local function installClone(src: Instance, destParent: Instance, destName: string?)
+	local clone = src:Clone()
+	clone.Name = destName or src.Name
+
+	local existing = destParent:FindFirstChild(clone.Name)
+	if existing then
+		existing:Destroy()
+	end
+
+	clone.Parent = destParent
+	return clone
+end
+
+-- ===== Validate structure =====
+local chatServerModule = must(content, "ChatServer.server") -- ModuleScript
+local iconModule = must(content, "Icon") -- ModuleScript
+local clientGui = must(content, "IGCS_Client") -- ScreenGui
+local configModule = must(igcsRoot, "IGCSConfiguration") -- ModuleScript
+local bridge = must(content, "IGCS_AdminBridge")
+
+-- ===== Install to correct services =====
+installClone(iconModule, ReplicatedStorage, "Icon")
+installClone(iconModule, ReplicatedStorage, "IGCS_AdminBridge")
+installClone(configModule, ReplicatedStorage, "IGCSConfiguration")
+installClone(clientGui, StarterGui, "IGCS_Client")
+
+-- ===== Create remotes (names can be configured later) =====
+local remotes = ensureFolder(ReplicatedStorage, "IGCS_Remotes")
+ensureRemoteEvent(remotes, "SendMessage")
+ensureRemoteEvent(remotes, "BroadcastMessage")
+ensureRemoteEvent(remotes, "WhisperMessage")
+
+-- ===== Disable default Roblox chat UI (server-side) =====
+StarterGuiService:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false)
+
+-- ===== Start chat server module =====
+local ok, modOrErr = pcall(require, chatServerModule)
+if not ok then
+	warn("[IGCS Initialise] Failed to require ChatServer.server:", modOrErr)
+	return
+end
+
+if type(modOrErr) == "table" and type(modOrErr.Start) == "function" then
+	modOrErr.Start()
+elseif type(modOrErr) == "function" then
+	modOrErr()
+else
+	warn("[IGCS Initialise] ChatServer.server must return a table with Start() or a function.")
+end
+
+print("[IGCS Initialise] Installed IGCS assets + started server.")]]></ProtectedString>
+				<bool name="Disabled">false</bool>
+				<Content name="LinkedSource"><null></null></Content>
+				<token name="RunContext">0</token>
+				<string name="ScriptGuid">{AE0388E1-138C-48BF-A182-B884F947B602}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">Initialise</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBXFE3E3F6CADB947B0B48D8F9A66B81106">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[-- IGCSConfiguration.lua
+-- Shared config + helper constructors for IGCS (client uses CreateIcon()).
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local IGCSConfiguration = {}
+
+-- ====== CONFIG (edit these) ======
+IGCSConfiguration.IconImage = "http://www.roblox.com/asset/?id=6035173838"
+IGCSConfiguration.IconLabel = "IGCS"
+IGCSConfiguration.IconName = "IGCS"
+IGCSConfiguration.IconFont = Enum.Font.GothamBold
+
+IGCSConfiguration.PlaceholderText = "Type Your Message here..."
+IGCSConfiguration.MaxMessageLength = 200
+
+-- Remotes folder name used by server/client
+IGCSConfiguration.RemotesFolderName = "IGCS_Remotes"
+IGCSConfiguration.SendRemoteName = "SendMessage"
+IGCSConfiguration.BroadcastRemoteName = "BroadcastMessage"
+-- =================================
+
+-- Creates and returns a TopbarPlus icon using this config.
+-- NOTE: This expects ReplicatedStorage.Icon to exist.
+function IGCSConfiguration.CreateIcon()
+	local Icon = require(ReplicatedStorage:WaitForChild("Icon"))
+
+	local icon = Icon.new()
+		:setImage(IGCSConfiguration.IconImage)
+		:setLabel(IGCSConfiguration.IconLabel)
+		:setName(IGCSConfiguration.IconName)
+		:setTextFont(IGCSConfiguration.IconFont)
+		:oneClick()
+
+	return icon
+end
+
+-- Helper to get remotes consistently (client-side or server-side)
+function IGCSConfiguration.GetRemotes()
+	local folder = ReplicatedStorage:WaitForChild(IGCSConfiguration.RemotesFolderName)
+	local sendRE = folder:WaitForChild(IGCSConfiguration.SendRemoteName)
+	local broadcastRE = folder:WaitForChild(IGCSConfiguration.BroadcastRemoteName)
+	return folder, sendRE, broadcastRE
+end
+
+return IGCSConfiguration]]></ProtectedString>
+				<string name="ScriptGuid">{81A5B26D-739F-4514-8E2C-4A5C5A2AA6B4}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">IGCSConfiguration</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="Script" referent="RBX659809D9A34A48A7A9BE7E72F11EDEE2">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[--[[
+
+  _____ _____  _____  _____ 
+ |_   _/ ____|/ ____|/ ____|
+   | || |  __| |    | (___  
+   | || | |_ | |     \___ \ 
+  _| || |__| | |____ ____) |
+ |_____\_____|\_____|_____/ 
+                            
+                                                                         
+IGCS ??In-Game Chat System
+Open-source and free to use, modify, and redistribute in any form (commercial or non-commercial).
+No credits required.
+
+Why this exists
+- To provide a lightweight, customizable chat UI with optional bubble chat and basic scopes (Global / Team / Whisper).
+- To keep chat logic transparent and auditable: filtering happens on the server, UI runs on the client.
+- To let developers control the experience (styling, commands, moderation hooks) without relying on default chat UI.
+
+How to use (quick start)
+1) Place the IGCS folder in Workspace with this structure:
+   - IGCS
+     - Content
+       - ChatServer.server      (ModuleScript)
+       - Icon                  (ModuleScript)
+       - IGCS_Client           (ScreenGui)
+     - Initialise              (Script)
+     - IGCSConfig              (ModuleScript)
+
+2) Ensure Initialise runs on the server. It installs:
+   - Icon + IGCSConfig into ReplicatedStorage
+   - IGCS_Client into StarterGui (so all players receive the UI)
+   - RemoteEvents into ReplicatedStorage (IGCS_Remotes)
+
+3) Make sure the client UI listens for:
+   - BroadcastMessage (global/system)
+   - WhisperMessage (team/whisper/system-to-player)
+
+Chat scopes / commands (default)
+- Global:        type normally
+- Team chat:     /t message   or /team message
+- Whisper/PM:    /w player message   or /pm player message
+
+Notes on safety and privacy
+- This system uses Roblox text filtering on the server; do not remove filtering.
+- Safety should be addressed through moderation, reporting, and careful data handling.
+- ?ge verification??alone does not guarantee child safety, and can increase the risk of targeted abuse and data exposure if implemented poorly.
+  Build with minimal data collection and strong security practices.
+]]]]></ProtectedString>
+				<bool name="Disabled">true</bool>
+				<Content name="LinkedSource"><null></null></Content>
+				<token name="RunContext">0</token>
+				<string name="ScriptGuid">{E3541FB2-C150-4934-93C0-33339184F794}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">README</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="Script" referent="RBX51FAB0CC3A48459ABD5BD7FB8F539449">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[--[[
+
+  _____ _____  _____  _____ 
+ |_   _/ ____|/ ____|/ ____|
+   | || |  __| |    | (___  
+   | || | |_ | |     \___ \ 
+  _| || |__| | |____ ____) |
+ |_____\_____|\_____|_____/ 
+                            
+                            
+ THIRD-PARTY DEPENDENCY LICENSE NOTICE
+ 
+ ------------------------------------------------------------------------------
+
+  ?? Third-Party Notice
+
+  This project makes use of the open-source "TopbarPlus" module for Roblox UI icons.
+
+  Project Name: TopbarPlus v3
+  Author: ForeverHD (and contributors)
+  License: Mozilla Public License 2.0 (MPL-2.0)
+  Source: https://github.com/1ForeverHD/TopbarPlus
+
+  ?? License Summary:
+    ??The MPL-2.0 license allows commercial use, modification, distribution, and private use.
+    ??If you make significant changes to the TopbarPlus code itself, you must open-source those modified files
+      and keep them under the MPL-2.0 license.
+    ??You must always provide clear attribution back to the original project (this notice satisfies that requirement).
+
+ ------------------------------------------------------------------------------
+
+  The "Icon" Module used in this project is from TopbarPlus (licensed under MPL-2.0).
+  All rights for TopbarPlus remain with its original authors and contributors.
+
+]]]]></ProtectedString>
+				<bool name="Disabled">true</bool>
+				<Content name="LinkedSource"><null></null></Content>
+				<token name="RunContext">0</token>
+				<string name="ScriptGuid">{615945E0-4790-4634-9185-7EE307B5DF71}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">LICENSE.TXT (ICON)</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+		<Item class="Script" referent="RBX5ABAA591C05C45FC8EED210E9A96674C">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[--[[
+           
+  _____ _____  _____  _____ 
+ |_   _/ ____|/ ____|/ ____|
+   | || |  __| |    | (___  
+   | || | |_ | |     \___ \ 
+  _| || |__| | |____ ____) |
+ |_____\_____|\_____|_____/ 
+                            
+In-Game Chat System
+11 JAN 2026
+
+LICENSE (MIT)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+]]]]></ProtectedString>
+				<bool name="Disabled">true</bool>
+				<Content name="LinkedSource"><null></null></Content>
+				<token name="RunContext">0</token>
+				<string name="ScriptGuid">{C8D277AF-9178-4166-B0C5-580A4F3DF603}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">LICENSE.TXT (IGCS)</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
+			</Properties>
+		</Item>
+	</Item>
+	<SharedStrings>
+		<SharedString md5="yuZpQdnvvUBOTYh1jqZ2cA=="></SharedString>
+	</SharedStrings>
+</roblox>

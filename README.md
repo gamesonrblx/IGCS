@@ -1,48 +1,70 @@
-> [!warning]
-> This project may fall within a grey area of the Roblox Terms of Use / Community Standards depending on how you configure and deploy it. Use at your own risk and with caution.
-> You are responsible for:
-> - Ensuring all chat is properly filtered and moderated
-> - Complying with all applicable Roblox policies and safety requirements
-> - Handling any user data responsibly (collect as little as possible)
-> 
-> If you are unsure whether your use-case is allowed, review Roblox policy docs and consider getting guidance before publishing.
-                            
-                                                                         
-# IGCS — In-Game Chat System
-Open-source and free to use, modify, and redistribute in any form (commercial or non-commercial).
-No credits required.
+# IGCS - In-Game Chat System
 
-## Why this exists
-- To provide a lightweight, customizable chat UI with optional bubble chat and basic scopes (Global / Team / Whisper).
-- To keep chat logic transparent and auditable: filtering happens on the server, UI runs on the client.
-- To let developers control the experience (styling, commands, moderation hooks) without relying on default chat UI.
+IGCS v2 keeps the proven v1.4 communication module and replaces only the visible chat with React-Lua.
 
-## How to use (quick start)
-1) Place the IGCS folder in Workspace with this structure:
-   - IGCS
-     - Content
-       - ChatServer.server      (ModuleScript)
-       - Icon                  (ModuleScript)
-       - IGCS_Client           (ScreenGui)
-     - Initialise              (Script)
-     - IGCSConfig              (ModuleScript)
+## What changed
 
-2) Ensure Initialise runs on the server. It installs:
-   - Icon + IGCSConfig into ReplicatedStorage
-   - IGCS_Client into StarterGui (so all players receive the UI)
-   - RemoteEvents into ReplicatedStorage (IGCS_Remotes)
+- The static `OuterFrame` tree and imperative `CMain` UI are replaced with the React-Lua chat surface in `src/client/`.
+- **Global** shows the current global and whisper payloads; **Team** renders the current `scope = "team"` payloads.
+- Sending from Team emits `/t <message>` to the existing `SendMessage` remote. Filtering, permission checks, bubble chat, whispers, and rate limiting remain in the current server module.
+- The React client ignores `payload.system == true`, so joined/left, summary, and age/safety notice lines never appear in the IGCS panel.
+- The existing TopbarPlus `Icon` dependency remains. React recreates the `IGCS_ChatIcon` singleton through `IGCSConfiguration.CreateIcon()` and uses it to open and close the chat.
+- The Adonis `IGCS_RunCommand` bridge is removed. Admin-prefixed input first enters hidden normal Roblox chat, then follows the existing IGCS relay for display.
 
-3) Make sure the client UI listens for:
-   - BroadcastMessage (global/system)
-   - WhisperMessage (team/whisper/system-to-player)
+## Architecture
 
-## Chat scopes / commands (default)
-- Global:        type normally
-- Team chat:     /t message   or /team message
-- Whisper/PM:    /w player message   or /pm player message
+```text
+ReactChat.client.lua + ChatApp.lua      React-Lua presentation only
+CommandAdapter.lua                     : ; ! -> hidden normal Roblox chat
+             |                         (no Adonis API bridge)
+             v
+existing IGCS_Remotes.SendMessage -> existing ChatServer.server
+                                    filtering / scopes / bubbles / remotes
+```
 
-## Notes on safety and privacy
-- This system uses Roblox text filtering on the server; do not remove filtering.
-- Safety should be addressed through moderation, reporting, and careful data handling.
-- “Age verification” alone does not guarantee child safety, and can increase the risk of targeted abuse and data exposure if implemented poorly.
-  Build with minimal data collection and strong security practices.
+## Install React-Lua
+
+This source tree uses Wally aliases so the client can require `ReplicatedStorage.Packages.React` and `ReactRoblox`.
+
+```sh
+wally install
+```
+
+`default.project.json` is available for local source sync. The full importable model is produced by the builder below; it preserves the existing v1.4 hierarchy rather than replacing it. Do not move `IGCS_Remotes` or modify the ordinary message handlers.
+
+## Build the importable RBXMX
+
+The tracked [`template/IGCS_V1.4.a.rbxmx`](template/IGCS_V1.4.a.rbxmx) is the current full model baseline. The Python builder preserves its established communication hierarchy, injects the React-Lua client and Wally packages, removes the Adonis bridge, and writes an importable model.
+
+```sh
+wally install
+python tools/build_rbxmx.py
+```
+
+The result is `dist/IGCS-v2.rbxmx`. Use `python tools/build_rbxmx.py --skip-packages dist/IGCS-source-smoke.rbxmx` to validate the XML patching path without downloading packages.
+
+GitHub Actions runs this exact build on pull requests and `v1.4.0` pushes, then uploads `IGCS-v2.rbxmx` and a SHA-256 checksum as the **IGCS-v2-rbxmx** artifact.
+
+## Update the existing IGCS model
+
+1. Keep `Content/ChatServer.server` and its normal global/team/whisper code.
+2. Apply the small Adonis-only change in [`migration/REMOVE_ADONIS.md`](migration/REMOVE_ADONIS.md).
+3. Under `Content/IGCS_Client`, remove `OuterFrame` and replace `CMain` with `ReactChat.client.lua`; add its sibling `ChatApp`, `CommandAdapter`, and `Theme` modules.
+4. Ensure the Wally `Packages` folder is in `ReplicatedStorage` before running the model.
+
+The React client hides Roblox's native chat window, input bar, and channel tabs; it does **not** disable the default chat transport. This preserves the normal-chat path that existing admin tools and chat observers use.
+
+The builder also removes the old server-side `StarterGui:SetCoreGuiEnabled()` calls. They are invalid from a server script; visual hiding now happens only in the React LocalScript.
+
+## Validation checklist
+
+- Global input still reaches all players through the current filtered server route.
+- Team-tab input arrives through the same `/t` parser and is visible only in Team.
+- `:`, `;`, and `!` no longer call `IGCS_RunCommand`, `Process.Command()`, or `IGCS_AdminBridge`.
+- System payloads do not render in the React panel.
+- `/e`, `/emote`, `/w`, `/pm`, and `/whisper` continue to use their existing paths.
+
+## Migration scope
+
+The supplied `IGCS_V1.4.a.rbxmx` is the behavioral source of truth. The old binary `IGCS_v1.4.0.rbxm` remains in this repository for backward compatibility; the new source tree is the maintainable v2 implementation.
+

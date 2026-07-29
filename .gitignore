@@ -1,0 +1,12 @@
+# Wally output is reproducible from wally.toml.
+Packages/
+dist/
+.tools/
+__pycache__/
+tools/__pycache__/
+
+# Rojo sourcemaps and local Studio files.
+sourcemap.json
+*.rbxl
+*.rbxlx
+

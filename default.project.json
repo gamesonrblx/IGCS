@@ -1,0 +1,24 @@
+{
+  "name": "IGCS",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Packages": {
+        "$path": "Packages"
+      }
+    },
+    "Workspace": {
+      "IGCS": {
+        "$className": "Folder",
+        "Content": {
+          "$className": "Folder",
+          "IGCS_Client": {
+            "$className": "ScreenGui",
+            "$path": "src/client"
+          }
+        }
+      }
+    }
+  }
+}
+

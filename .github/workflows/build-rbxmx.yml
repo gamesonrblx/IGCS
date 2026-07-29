@@ -1,0 +1,53 @@
+name: Build IGCS RBXMX
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v1.4.0]
+  pull_request:
+    branches: [v1.4.0]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Wally
+        run: |
+          git clone --depth 1 --branch v0.3.2 https://github.com/UpliftGames/wally.git /tmp/wally
+          cargo install --locked --path /tmp/wally
+
+      - name: Install React-Lua packages
+        run: wally install
+
+      - name: Check the builder
+        run: python tools/build_rbxmx.py --skip-packages dist/IGCS-source-smoke.rbxmx
+
+      - name: Build importable model
+        run: python tools/build_rbxmx.py dist/IGCS-v2.rbxmx
+
+      - name: Write checksum
+        run: sha256sum dist/IGCS-v2.rbxmx > dist/IGCS-v2.rbxmx.sha256
+
+      - name: Upload RBXMX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IGCS-v2-rbxmx
+          path: |
+            dist/IGCS-v2.rbxmx
+            dist/IGCS-v2.rbxmx.sha256
+          if-no-files-found: error
+
