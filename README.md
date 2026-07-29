@@ -21,6 +21,43 @@ No credits required.
 - Developers control styling and layout without depending on Roblox’s default chat window
 - Code-first UI (React-Lua) so you can review and version the interface like any other source file
 
+## How v2 works
+
+React-Lua is the **presentation layer only**. Send path, filter, scopes, and bubbles still live on the existing server module and remotes.
+
+```mermaid
+flowchart TB
+  subgraph Client["Client (React-Lua UI)"]
+    Icon["TopbarPlus Icon"]
+    UI["ChatApp / tabs / composer"]
+    Adapter["CommandAdapter"]
+    Icon --> UI
+    UI -->|"normal / team text"| Send["IGCS_Remotes.SendMessage"]
+    UI -->|"admin prefixes : ; !"| Adapter
+    Adapter -->|"hidden normal Roblox chat"| Native["Default chat transport"]
+    Adapter --> Send
+  end
+
+  subgraph Server["Server (v1.4 ChatServer)"]
+    Send --> CS["ChatServer.server"]
+    CS --> Filter["Roblox text filter"]
+    Filter --> Scope{"scope"}
+    Scope -->|global| BAll["BroadcastMessage → all"]
+    Scope -->|team| BTeam["WhisperMessage → team"]
+    Scope -->|whisper| BWhisper["WhisperMessage → target"]
+    Filter --> Bubble["Bubble chat"]
+  end
+
+  subgraph Render["Client render"]
+    BAll --> Panel["IGCS panel"]
+    BTeam --> Panel
+    BWhisper --> Panel
+    Panel --> Style["Name color / fonts / team label from IGCSConfiguration"]
+  end
+```
+
+**In short:** player types → optional admin route through hidden default chat → same `SendMessage` remote → server filters and fans out → React panel paints the line (player name font/color separate from message body).
+
 ## Quick start (drop-in model)
 
 The easiest path is the built model in this repo:
@@ -77,10 +114,12 @@ Edit the chat UI settings in shared config (in source: `src/shared/IGCSConfigura
 
 Useful knobs:
 
-- Panel position and desktop/mobile size
-- Desktop minimum size (`400 × 270` by default)
+- Panel position and desktop/mobile size (PC min `400 × 270` by default)
 - Background transparency, stroke colors, accent color
-- Whether Team tab requires being on a team
+- Fonts: `PlayerNameFont`, `TeamLabelFont`, `MessageFont`, `SystemMessageFont`, `TabFont`, `InputFont`
+- Name colors: classic Roblox player color, optional `OverridePlayerColorWithTeam`, optional `ShowTeamLabel`
+- Whether Team tab requires being on a team (`TeamTabRequiresTeam`); tab bar hides when there is no second channel
+- `ShowSystemMessages` (off by default)
 
 Rebuild the model after source edits (see below), or tweak `IGCSConfig` inside Studio if you are iterating on a place file.
 
@@ -96,12 +135,6 @@ python tools/build_rbxmx.py
 ```
 
 Output: `dist/IGCS-v2.rbxmx`
-
-Smoke-test the builder without pulling packages:
-
-```sh
-python tools/build_rbxmx.py --skip-packages dist/IGCS-source-smoke.rbxmx
-```
 
 GitHub Actions builds on pushes and pull requests to `main` and uploads the **IGCS-v2-rbxmx** artifact (model + SHA-256).
 

@@ -23,8 +23,23 @@ type Tab = "global" | "team"
 type ChatMessage = {
 	id: string,
 	scope: Scope,
+	userId: number?,
+	username: string,
 	displayName: string,
 	text: string,
+	isSystem: boolean?,
+}
+
+-- Classic Roblox chat name colors (same palette/algorithm as legacy chat).
+local NAME_COLORS = {
+	BrickColor.new("Bright red").Color,
+	BrickColor.new("Bright blue").Color,
+	BrickColor.new("Earth green").Color,
+	BrickColor.new("Bright violet").Color,
+	BrickColor.new("Bright orange").Color,
+	BrickColor.new("Bright yellow").Color,
+	BrickColor.new("Light reddish violet").Color,
+	BrickColor.new("Brick yellow").Color,
 }
 
 local function escapeRichText(text: string): string
@@ -104,13 +119,94 @@ local function colorToHex(color: Color3): string
 	return string.format("#%02X%02X%02X", math.round(color.R * 255), math.round(color.G * 255), math.round(color.B * 255))
 end
 
+local function resolveFont(font: Enum.Font?, fallback: Enum.Font): Enum.Font
+	return if font ~= nil then font else fallback
+end
+
+-- Rich text face= uses the Enum.Font name (e.g. "Gotham", "GothamBold").
+local function wrapRichFont(font: Enum.Font, color: Color3, content: string, bold: boolean?): string
+	local inner = if bold then "<b>" .. content .. "</b>" else content
+	return string.format('<font face="%s" color="%s">%s</font>', font.Name, colorToHex(color), inner)
+end
+
+local function getNameValue(pName: string): number
+	local value = 0
+	local length = #pName
+	for index = 1, length do
+		local cValue = string.byte(pName, index)
+		local reverseIndex = length - index + 1
+		if length % 2 == 1 then
+			reverseIndex = reverseIndex - 1
+		end
+		if reverseIndex % 4 >= 2 then
+			cValue = -cValue
+		end
+		value += cValue
+	end
+	return value
+end
+
+local function getRobloxNameColor(username: string): Color3
+	if username == "" then
+		return NAME_COLORS[1]
+	end
+	return NAME_COLORS[(getNameValue(username) % #NAME_COLORS) + 1]
+end
+
+local function resolvePlayer(message: ChatMessage): Player?
+	if message.userId then
+		local byId = Players:GetPlayerByUserId(message.userId)
+		if byId then
+			return byId
+		end
+	end
+	if message.username ~= "" then
+		local byName = Players:FindFirstChild(message.username)
+		if byName and byName:IsA("Player") then
+			return byName
+		end
+	end
+	return nil
+end
+
+local function getPlayerNameColor(message: ChatMessage): Color3
+	local player = resolvePlayer(message)
+	if Ui.OverridePlayerColorWithTeam and player and player.Team ~= nil then
+		return player.TeamColor.Color
+	end
+	local username = if player then player.Name else message.username
+	if username == "" then
+		username = message.displayName
+	end
+	return getRobloxNameColor(username)
+end
+
+local function getTeamLabelParts(message: ChatMessage): (string?, Color3?)
+	if not Ui.ShowTeamLabel then
+		return nil, nil
+	end
+
+	local player = resolvePlayer(message)
+	if player and player.Team then
+		return player.Team.Name, player.TeamColor.Color
+	end
+
+	-- Team-scope lines still get a generic label if the sender left the game.
+	if message.scope == "team" then
+		return "Team", Theme.TeamMessage
+	end
+
+	return nil, nil
+end
+
 local function ChannelTab(props: { label: string, active: boolean, layoutOrder: number, onActivated: () -> () })
+	local tabFont = resolveFont((Ui :: any).TabFont, Enum.Font.GothamBold)
 	return React.createElement("TextButton", {
 		AutoButtonColor = false,
 		BackgroundColor3 = Theme.PanelStrong,
 		BackgroundTransparency = if props.active then Ui.ActiveTabBackgroundTransparency else 1,
 		BorderSizePixel = 0,
-		Font = Enum.Font.GothamBold,
+		Font = tabFont,
 		LayoutOrder = props.layoutOrder,
 		Size = UDim2.fromOffset(Ui.TabSize.X, Ui.TabSize.Y),
 		Text = props.label,
@@ -125,18 +221,53 @@ local function ChannelTab(props: { label: string, active: boolean, layoutOrder: 
 end
 
 local function ChatLine(props: { message: ChatMessage, order: number })
-	local senderColor = colorToHex(if props.message.scope == "team" then Theme.TeamMessage else Theme.TextPrimary)
-	local scopePrefix = if props.message.scope == "whisper" then "<font color=\"#D7A6FF\">[Whisper] </font>" else ""
+	local playerFont = resolveFont((Ui :: any).PlayerNameFont, Enum.Font.GothamBold)
+	local teamFont = resolveFont((Ui :: any).TeamLabelFont, Enum.Font.GothamBold)
+	local messageFont = resolveFont((Ui :: any).MessageFont, Enum.Font.Gotham)
+	local systemFont = resolveFont((Ui :: any).SystemMessageFont, Enum.Font.Gotham)
 	local name = escapeRichText(props.message.displayName)
 	local text = escapeRichText(props.message.text)
-	local richMessage = scopePrefix
-		.. "<font color=\"" .. senderColor .. "\"><b>" .. name .. ":</b></font>"
-		.. " <font color=\"" .. colorToHex(Theme.TextPrimary) .. "\">" .. text .. "</font>"
+
+	-- System lines: whole body uses SystemMessageFont (no player name color).
+	if props.message.isSystem then
+		local systemColor = Theme.TextSecondary
+		local richSystem = wrapRichFont(systemFont, systemColor, text)
+		return React.createElement("TextLabel", {
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			Font = systemFont,
+			LayoutOrder = props.order,
+			RichText = true,
+			Size = UDim2.new(1, -4, 0, 0),
+			Text = richSystem,
+			TextColor3 = systemColor,
+			TextSize = (Ui :: any).SystemMessageTextSize or Ui.MessageTextSize,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+		})
+	end
+
+	local prefixes = ""
+	if props.message.scope == "whisper" then
+		local whisperLabelColor = (Ui :: any).WhisperLabelColor or Color3.fromRGB(215, 166, 255)
+		prefixes ..= wrapRichFont(teamFont, whisperLabelColor, "[Whisper] ")
+	end
+
+	local teamLabel, teamColor = getTeamLabelParts(props.message)
+	if teamLabel and teamColor then
+		prefixes ..= wrapRichFont(teamFont, teamColor, "[" .. escapeRichText(teamLabel) .. "] ")
+	end
+
+	-- Name / team label / message body each get their own configured font + color.
+	local richMessage = prefixes
+		.. wrapRichFont(playerFont, getPlayerNameColor(props.message), name, true)
+		.. wrapRichFont(messageFont, Theme.TextPrimary, ": " .. text)
 
 	return React.createElement("TextLabel", {
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
-		Font = Enum.Font.Gotham,
+		Font = messageFont,
 		LayoutOrder = props.order,
 		RichText = true,
 		Size = UDim2.new(1, -4, 0, 0),
@@ -150,12 +281,7 @@ local function ChatLine(props: { message: ChatMessage, order: number })
 end
 
 local function normalizePayload(payload: any, sequence: number): ChatMessage?
-	if type(payload) ~= "table" or payload.system == true then
-		return nil
-	end
-
-	local scope = tostring(payload.scope or "global"):lower()
-	if scope ~= "global" and scope ~= "team" and scope ~= "whisper" then
+	if type(payload) ~= "table" then
 		return nil
 	end
 
@@ -164,11 +290,46 @@ local function normalizePayload(payload: any, sequence: number): ChatMessage?
 		return nil
 	end
 
+	-- System messages stay off by default; enable with ChatUI.ShowSystemMessages.
+	if payload.system == true then
+		if (Ui :: any).ShowSystemMessages ~= true then
+			return nil
+		end
+		return {
+			id = tostring(payload.t or os.clock()) .. "-" .. tostring(sequence),
+			scope = "global" :: Scope,
+			userId = nil,
+			username = "",
+			displayName = "",
+			text = text,
+			isSystem = true,
+		}
+	end
+
+	local scope = tostring(payload.scope or "global"):lower()
+	if scope ~= "global" and scope ~= "team" and scope ~= "whisper" then
+		return nil
+	end
+
+	local userId: number? = nil
+	local rawUserId = payload.userId or payload.fromUserId
+	if type(rawUserId) == "number" then
+		userId = rawUserId
+	elseif type(rawUserId) == "string" then
+		local parsed = tonumber(rawUserId)
+		if parsed then
+			userId = parsed
+		end
+	end
+
 	return {
 		id = tostring(payload.t or os.clock()) .. "-" .. tostring(sequence),
 		scope = scope :: Scope,
+		userId = userId,
+		username = tostring(payload.username or payload.fromUsername or ""),
 		displayName = tostring(payload.displayName or payload.fromDisplayName or payload.username or payload.fromUsername or "Player"),
 		text = text,
+		isSystem = false,
 	}
 end
 
@@ -187,6 +348,11 @@ local function ChatApp()
 	local sendMessage = remotes:WaitForChild("SendMessage") :: RemoteEvent
 	local broadcastMessage = remotes:WaitForChild("BroadcastMessage") :: RemoteEvent
 	local whisperMessage = remotes:WaitForChild("WhisperMessage") :: RemoteEvent
+
+	-- Second channel today is Team. When a Whisper tab exists later, include it here.
+	local showTeamTab = not Ui.TeamTabRequiresTeam or hasTeam
+	local showTabBar = showTeamTab
+	local messagesTop = if showTabBar then Ui.MessagesTop else Ui.PanelPadding
 
 	React.useEffect(function()
 		if Ui.TeamTabRequiresTeam and not hasTeam and activeTab == "team" then
@@ -244,7 +410,7 @@ local function ChatApp()
 				end
 			end)
 		end
-	end, { messages, activeTab })
+	end, { messages, activeTab, showTabBar })
 
 	local function sendCurrent()
 		local text = draft:gsub("\r", ""):gsub("\n", "")
@@ -303,48 +469,48 @@ local function ChatApp()
 			MinimumSize = React.createElement("UISizeConstraint", {
 				MinSize = panelLayout.minimum,
 			}),
-			Tabs = React.createElement("Frame", {
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				Position = UDim2.fromOffset(Ui.PanelPadding, Ui.TabsTop),
-				Size = UDim2.new(1, -Ui.PanelPadding * 2, 0, Ui.TabSize.Y),
-				ZIndex = 2,
-			}, {
-				Layout = React.createElement("UIListLayout", {
-					FillDirection = Enum.FillDirection.Horizontal,
-					HorizontalAlignment = Enum.HorizontalAlignment.Left,
-					Padding = UDim.new(0, Ui.TabGap),
-					SortOrder = Enum.SortOrder.LayoutOrder,
-				}),
-				All = React.createElement(ChannelTab, {
-					active = activeTab == "global",
-					label = "All",
-					layoutOrder = 1,
-					onActivated = function()
-						setActiveTab("global")
-					end,
-				}),
-				Team = if not Ui.TeamTabRequiresTeam or hasTeam
-					then React.createElement(ChannelTab, {
+			Tabs = if showTabBar
+				then React.createElement("Frame", {
+					BackgroundTransparency = 1,
+					BorderSizePixel = 0,
+					Position = UDim2.fromOffset(Ui.PanelPadding, Ui.TabsTop),
+					Size = UDim2.new(1, -Ui.PanelPadding * 2, 0, Ui.TabSize.Y),
+					ZIndex = 2,
+				}, {
+					Layout = React.createElement("UIListLayout", {
+						FillDirection = Enum.FillDirection.Horizontal,
+						HorizontalAlignment = Enum.HorizontalAlignment.Left,
+						Padding = UDim.new(0, Ui.TabGap),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					}),
+					All = React.createElement(ChannelTab, {
+						active = activeTab == "global",
+						label = "All",
+						layoutOrder = 1,
+						onActivated = function()
+							setActiveTab("global")
+						end,
+					}),
+					Team = React.createElement(ChannelTab, {
 						active = activeTab == "team",
 						label = "Team",
 						layoutOrder = 2,
 						onActivated = function()
 							setActiveTab("team")
 						end,
-					})
-					else nil,
-			}),
+					}),
+				})
+				else nil,
 			Messages = React.createElement("ScrollingFrame", {
 				AutomaticCanvasSize = Enum.AutomaticSize.Y,
 				BackgroundTransparency = 1,
 				BorderSizePixel = 0,
 				CanvasSize = UDim2.fromOffset(0, 0),
-				Position = UDim2.new(0, Ui.PanelPadding, 0, Ui.MessagesTop),
+				Position = UDim2.new(0, Ui.PanelPadding, 0, messagesTop),
 				ScrollBarImageColor3 = Ui.PanelStrokeColor,
 				ScrollBarImageTransparency = Ui.PanelStrokeTransparency,
 				ScrollBarThickness = 3,
-				Size = UDim2.new(1, -Ui.PanelPadding * 2, 1, -Ui.MessagesTop - Ui.ComposerHeight - Ui.ComposerBottom - 4),
+				Size = UDim2.new(1, -Ui.PanelPadding * 2, 1, -messagesTop - Ui.ComposerHeight - Ui.ComposerBottom - 4),
 				ZIndex = 2,
 				ref = messagesRef,
 			}, messageChildren),
@@ -360,7 +526,7 @@ local function ChatApp()
 					BackgroundTransparency = Ui.FieldBackgroundTransparency,
 					BorderSizePixel = 0,
 					ClearTextOnFocus = false,
-					Font = Enum.Font.Gotham,
+					Font = resolveFont((Ui :: any).InputFont or (Ui :: any).MessageFont, Enum.Font.Gotham),
 					PlaceholderColor3 = Theme.TextSecondary,
 					PlaceholderText = if activeTab == "team" then "Message your team" else "To chat click here or press / key",
 					Position = UDim2.fromOffset(0, 0),
@@ -415,12 +581,12 @@ local function ChatApp()
 					then React.createElement("TextLabel", {
 						AnchorPoint = Vector2.new(0, 1),
 						BackgroundTransparency = 1,
-						Font = Enum.Font.Gotham,
+						Font = resolveFont((Ui :: any).SystemMessageFont, Enum.Font.Gotham),
 						Position = UDim2.new(0, 0, 0, -4),
 						Size = UDim2.new(1, 0, 0, 18),
 						Text = errorText,
 						TextColor3 = Theme.Error,
-						TextSize = 13,
+						TextSize = (Ui :: any).SystemMessageTextSize or 13,
 						TextXAlignment = Enum.TextXAlignment.Left,
 						ZIndex = 5,
 					})
