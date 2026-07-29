@@ -1,6 +1,5 @@
 # Wally output is reproducible from wally.toml.
 Packages/
-dist/
 .tools/
 __pycache__/
 tools/__pycache__/
@@ -9,4 +8,3 @@ tools/__pycache__/
 sourcemap.json
 *.rbxl
 *.rbxlx
-

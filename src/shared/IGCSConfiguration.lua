@@ -24,6 +24,7 @@ IGCSConfiguration.BroadcastRemoteName = "BroadcastMessage"
 IGCSConfiguration.ChatUI = {
 	Position = UDim2.fromOffset(10, 8),
 	DesktopSize = UDim2.fromScale(0.30, 0.25),
+	DesktopMinimumSize = Vector2.new(400, 270),
 	MobileSize = UDim2.new(1, -20, 0.36, 0),
 	MobileBreakpoint = 750,
 	MobileHorizontalMargin = 10,
@@ -87,4 +88,3 @@ function IGCSConfiguration.GetRemotes()
 end
 
 return IGCSConfiguration
-

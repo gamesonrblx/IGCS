@@ -44,19 +44,30 @@ local function addStroke(color: Color3, thickness: number, transparency: number)
 	})
 end
 
-local function getPanelSize(): UDim2
+type PanelLayout = {
+	size: UDim2,
+	minimum: Vector2,
+}
+
+local function getPanelLayout(): PanelLayout
 	local camera = workspace.CurrentCamera
 	local viewport = if camera then camera.ViewportSize else Vector2.new(1280, 720)
 
 	if viewport.X < Ui.MobileBreakpoint then
-		return Ui.MobileSize
+		return {
+			size = Ui.MobileSize,
+			minimum = Vector2.zero,
+		}
 	end
 
-	return Ui.DesktopSize
+	return {
+		size = Ui.DesktopSize,
+		minimum = Ui.DesktopMinimumSize,
+	}
 end
 
-local function usePanelSize(): UDim2
-	local size, setSize = React.useState(getPanelSize())
+local function usePanelLayout(): PanelLayout
+	local layout, setLayout = React.useState(getPanelLayout())
 
 	React.useEffect(function()
 		local camera = workspace.CurrentCamera
@@ -64,14 +75,14 @@ local function usePanelSize(): UDim2
 			return
 		end
 		local connection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
-			setSize(getPanelSize())
+			setLayout(getPanelLayout())
 		end)
 		return function()
 			connection:Disconnect()
 		end
 	end, {})
 
-	return size
+	return layout
 end
 
 local function useHasTeam(): boolean
@@ -162,7 +173,7 @@ local function normalizePayload(payload: any, sequence: number): ChatMessage?
 end
 
 local function ChatApp()
-	local panelSize = usePanelSize()
+	local panelLayout = usePanelLayout()
 	local hasTeam = useHasTeam()
 	local activeTab, setActiveTab = React.useState("global" :: Tab)
 	local draft, setDraft = React.useState("")
@@ -284,11 +295,14 @@ local function ChatApp()
 			BorderSizePixel = 0,
 			ClipsDescendants = true,
 			Position = Ui.Position,
-			Size = panelSize,
+			Size = panelLayout.size,
 			ZIndex = 1,
 		}, {
 			Corner = addCorner(Ui.PanelCornerRadius),
 			Outline = addStroke(Ui.PanelStrokeColor, Ui.PanelStrokeThickness, Ui.PanelStrokeTransparency),
+			MinimumSize = React.createElement("UISizeConstraint", {
+				MinSize = panelLayout.minimum,
+			}),
 			Tabs = React.createElement("Frame", {
 				BackgroundTransparency = 1,
 				BorderSizePixel = 0,
@@ -417,4 +431,3 @@ local function ChatApp()
 end
 
 return ChatApp
-
