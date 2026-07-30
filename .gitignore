@@ -8,3 +8,7 @@ tools/__pycache__/
 sourcemap.json
 *.rbxl
 *.rbxlx
+
+# Agent/design scratch (not part of the public product docs).
+DESIGN.md
+PRODUCT.md
